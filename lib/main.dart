@@ -214,9 +214,9 @@ class _HyperIslandTestPageState extends State<HyperIslandTestPage> {
                     ),
                     SizedBox(height: 8),
                     Text(
-                      '此应用用于测试小米灵动岛通知功能。\n\n'
+                      '此页面仅用于测试是否支持超级岛。\n\n'
                       '点击上方按钮可以发送不同类型的岛通知。\n\n'
-                      '注意: 需要在支持灵动岛的小米设备上运行。',
+                      '实际使用请在LSPosed管理器中激活使用',
                     ),
                   ],
                 ),

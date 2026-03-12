@@ -1,0 +1,8 @@
+# Keep Xposed entry points
+-keep class de.robv.android.xposed.** { *; }
+-keep class * implements de.robv.android.xposed.IXposedHookLoadPackage { *; }
+-keep class * implements de.robv.android.xposed.IXposedHookInitPackageResources { *; }
+-keep class * implements de.robv.android.xposed.IXposedHookZygoteInit { *; }
+
+# Keep all Xposed module classes
+-keep class com.example.hyperisland.xposed.** { *; }

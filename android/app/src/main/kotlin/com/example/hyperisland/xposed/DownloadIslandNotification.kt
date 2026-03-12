@@ -64,8 +64,10 @@ object DownloadIslandNotification {
                                 this.title = fileName
                                 narrowFont = true
                             }
-                            progressInfo {
-                                this.progress = progress
+                            if (!isComplete) {
+                                progressInfo {
+                                    this.progress = progress
+                                }
                             }
                         }
                     }

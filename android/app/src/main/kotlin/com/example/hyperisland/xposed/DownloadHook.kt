@@ -17,7 +17,7 @@ import java.util.regex.Pattern
 class DownloadHook : IXposedHookLoadPackage {
 
     companion object {
-        private var extrasField: Field? = null
+        var extrasField: Field? = null
 
         private val processedNotifications = mutableMapOf<String, NotificationInfo>()
         private val downloadIdMap = mutableMapOf<Long, String>()
@@ -29,6 +29,9 @@ class DownloadHook : IXposedHookLoadPackage {
             var downloadId: Long = -1L
         )
 
+        // key = "${tag}_${id}"，仅供 cancel hook 降级使用
+        val notifSnapshots = mutableMapOf<String, InProcessController.DownloadNotifSnapshot>()
+
         init {
             try {
                 extrasField = Notification::class.java.getDeclaredField("extras")
@@ -37,6 +40,7 @@ class DownloadHook : IXposedHookLoadPackage {
                 e.printStackTrace()
             }
         }
+
     }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -54,6 +58,7 @@ class DownloadHook : IXposedHookLoadPackage {
             val nmClass = lpparam.classLoader.loadClass("android.app.NotificationManager")
             hookNotifyMethod(nmClass, lpparam, hasTag = true)
             hookNotifyMethod(nmClass, lpparam, hasTag = false)
+
 
             // 在下载 Manager App 进程里 Hook MiuiDownloadManager
             if (pkg == "com.xiaomi.android.app.downloadmanager") {
@@ -196,6 +201,22 @@ class DownloadHook : IXposedHookLoadPackage {
 
             DownloadIslandNotification.inject(context, extras, title, text, progress, appName, fileName, downloadId, lpparam.packageName)
             extras.putBoolean("hyperisland_processed", true)
+
+            // 同步最新快照给 InProcessController，供暂停后重建覆盖通知
+            val snapshotKey = "${tag}_$id"
+            if (isComplete) {
+                notifSnapshots.remove(snapshotKey)
+            } else {
+                val snapshot = InProcessController.DownloadNotifSnapshot(
+                    notifId = id, notifTag = tag,
+                    channelId = notif.channelId ?: "download",
+                    fileName = fileName, progress = progress,
+                    downloadId = downloadId, isMultiFile = isMultiFile,
+                    packageName = lpparam.packageName
+                )
+                notifSnapshots[snapshotKey] = snapshot
+                InProcessController.lastDownloadSnapshot = snapshot
+            }
 
         } catch (e: Throwable) {
             XposedBridge.log("HyperIsland: handleNotification error: ${e.message}")

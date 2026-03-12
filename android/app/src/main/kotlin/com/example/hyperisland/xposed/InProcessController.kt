@@ -1,6 +1,7 @@
 package com.example.hyperisland.xposed
 
 import android.app.DownloadManager
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -8,8 +9,10 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -46,6 +49,24 @@ object InProcessController {
 
     @Volatile private var registered = false
 
+    /** 下载通知快照，供暂停后重建覆盖通知 */
+    data class DownloadNotifSnapshot(
+        val notifId: Int,
+        val notifTag: String?,
+        val channelId: String,
+        val fileName: String,
+        val progress: Int,
+        val downloadId: Long,
+        val isMultiFile: Boolean,
+        val packageName: String
+    )
+
+    /** 最近一次快照 */
+    @Volatile var lastDownloadSnapshot: DownloadNotifSnapshot? = null
+
+    /** 固定 ID 的暂停覆盖通知，避免和 DM 原通知 ID 冲突 */
+    private const val PAUSED_OVERLAY_ID = 0x48594F01
+
     // ── 初始化：注册进程内 Receiver ────────────────────────────────────────────
 
     fun ensureRegistered(context: Context) {
@@ -64,9 +85,21 @@ object InProcessController {
                 val cmd = intent.getStringExtra(EXTRA_CMD)
                 XposedBridge.log("HyperIsland: onReceive cmd=$cmd id=$id")
                 when (cmd) {
-                    CMD_PAUSE   -> if (id > 0) pause(appCtx, id)  else pauseAll(appCtx)
-                    CMD_RESUME  -> if (id > 0) resume(appCtx, id) else resumeAll(appCtx)
-                    CMD_CANCEL  -> if (id > 0) cancel(appCtx, id) else cancelAll(appCtx)
+                    CMD_PAUSE -> {
+                        val isAll = id <= 0
+                        if (isAll) pauseAll(appCtx) else pause(appCtx, id)
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            postPausedOverlay(appCtx, isAll)
+                        }, 300)
+                    }
+                    CMD_RESUME -> {
+                        if (id > 0) resume(appCtx, id) else resumeAll(appCtx)
+                        cancelPausedOverlay(appCtx)
+                    }
+                    CMD_CANCEL -> {
+                        if (id > 0) cancel(appCtx, id) else cancelAll(appCtx)
+                        cancelPausedOverlay(appCtx)
+                    }
                     CMD_DISMISS -> {
                         val notifId  = intent.getIntExtra(EXTRA_NOTIF_ID, -1)
                         val notifTag = intent.getStringExtra(EXTRA_NOTIF_TAG)
@@ -129,9 +162,10 @@ object InProcessController {
     fun resumeIntent(context: Context, downloadId: Long) = makeIntent(context, CMD_RESUME, downloadId, reqCode(downloadId, 1))
     fun cancelIntent(context: Context, downloadId: Long) = makeIntent(context, CMD_CANCEL, downloadId, reqCode(downloadId, 2))
 
-    /** 暂停/取消所有下载（id=-1 触发 pauseAll/cancelAll） */
+    /** 暂停/恢复/取消所有下载（id=-1 触发 xxxAll） */
     fun pauseAllIntent(context: Context)  = makeIntent(context, CMD_PAUSE,  -1L, 9000001)
     fun cancelAllIntent(context: Context) = makeIntent(context, CMD_CANCEL, -1L, 9000002)
+    fun resumeAllIntent(context: Context) = makeIntent(context, CMD_RESUME, -1L, 9000003)
 
     fun dismissIntent(context: Context, notifId: Int, notifTag: String?): PendingIntent {
         val intent = Intent(ACTION).apply {
@@ -322,6 +356,77 @@ object InProcessController {
             }
         } catch (e: Exception) {
             XposedBridge.log("HyperIsland: cancelAll failed: ${e.message}")
+        }
+    }
+
+    // ── 暂停覆盖通知 ──────────────────────────────────────────────────────────
+
+    private fun postPausedOverlay(context: Context, isAll: Boolean) {
+        val snap = lastDownloadSnapshot ?: run {
+            XposedBridge.log("HyperIsland: postPausedOverlay — no snapshot")
+            return
+        }
+        val overlaySnap = snap.copy(
+            notifId    = PAUSED_OVERLAY_ID,
+            notifTag   = null,
+            isMultiFile = isAll || snap.isMultiFile
+        )
+        repostAsPaused(context, overlaySnap)
+    }
+
+    private fun repostAsPaused(context: Context, snapshot: DownloadNotifSnapshot) {
+        try {
+            val extrasField = DownloadHook.extrasField
+            val builder = Notification.Builder(context, snapshot.channelId)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle(if (snapshot.isMultiFile) "${snapshot.fileName} 已暂停" else "已暂停")
+                .setContentText(snapshot.fileName)
+                .setOngoing(false)
+                .setAutoCancel(false)
+            val notif = builder.build()
+            val extras = extrasField?.get(notif) as? Bundle ?: return
+
+            val pausedTitle = if (snapshot.isMultiFile) "${snapshot.fileName} 已暂停" else "已暂停"
+            DownloadIslandNotification.inject(
+                context, extras, pausedTitle, snapshot.fileName,
+                snapshot.progress, "", snapshot.fileName,
+                snapshot.downloadId, snapshot.packageName,
+                isPaused = true
+            )
+            extras.putBoolean("hyperisland_processed", true)
+
+            val resumeIntent = if (snapshot.isMultiFile) resumeAllIntent(context)
+                               else                      resumeIntent(context, snapshot.downloadId)
+            val cancelIntent = if (snapshot.isMultiFile) cancelAllIntent(context)
+                               else                      cancelIntent(context, snapshot.downloadId)
+            val resumeLabel = if (snapshot.isMultiFile) "全部恢复" else "恢复"
+            val cancelLabel = if (snapshot.isMultiFile) "全部取消" else "取消"
+
+            notif.actions = arrayOf(
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.ic_media_play),
+                    resumeLabel, resumeIntent
+                ).build(),
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.ic_delete),
+                    cancelLabel, cancelIntent
+                ).build()
+            )
+
+            val nm = context.getSystemService(NotificationManager::class.java)
+            nm?.notify(null, snapshot.notifId, notif)
+            XposedBridge.log("HyperIsland: repostAsPaused id=${snapshot.notifId}")
+        } catch (e: Exception) {
+            XposedBridge.log("HyperIsland: repostAsPaused failed: ${e.message}")
+        }
+    }
+
+    private fun cancelPausedOverlay(context: Context) {
+        try {
+            context.getSystemService(NotificationManager::class.java)?.cancel(PAUSED_OVERLAY_ID)
+            XposedBridge.log("HyperIsland: cancelPausedOverlay")
+        } catch (e: Exception) {
+            XposedBridge.log("HyperIsland: cancelPausedOverlay failed: ${e.message}")
         }
     }
 

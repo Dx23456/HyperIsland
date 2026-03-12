@@ -1,6 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 通知权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- 下载管理权限 -->
+    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION"/>
+    <uses-permission android:name="android.permission.ACCESS_DOWNLOAD_MANAGER"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
 
     <application
         android:label="hyperisland"
@@ -47,6 +51,16 @@
         <meta-data
             android:name="xposedscope"
             android:value="com.android.providers.downloads" />
+
+        <!-- 下载控制接收器 -->
+        <receiver
+            android:name=".xposed.DownloadControlReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.example.hyperisland.DOWNLOAD_CONTROL"/>
+            </intent-filter>
+        </receiver>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

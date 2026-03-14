@@ -18,6 +18,8 @@ import de.robv.android.xposed.XposedBridge
  */
 object DownloadIslandNotification {
 
+    private enum class IconType { DOWNLOADING }
+
     fun inject(
         context: Context,
         extras: Bundle,
@@ -34,25 +36,33 @@ object DownloadIslandNotification {
         try {
             val isComplete = progress >= 100
             val isMultiFile = Regex("""\d+个文件""").containsMatchIn(title + text + fileName)
+            val combined = title + text
+            val isWaiting = !isComplete &&
+                            (combined.contains("等待") || combined.contains("准备中") ||
+                             combined.contains("队列") || combined.contains("pending", ignoreCase = true) ||
+                             combined.contains("queued", ignoreCase = true))
 
             val displayTitle = when {
                 isComplete -> "下载完成"
                 isPaused   -> "已暂停"
-                else       -> "下载中 $progress%"
+                isWaiting  -> "等待中"
+                else       -> if (progress >= 0) "下载中 $progress%" else "下载中"
             }
             val displayContent = fileName.ifEmpty { text }
             val islandStateTitle = when {
                 isComplete -> "下载完成"
                 isPaused   -> "已暂停"
+                isWaiting  -> "等待中"
                 else       -> "下载中"
             }
 
             val tintColor = when {
-                isComplete -> 0xFF4CAF50.toInt()  // 绿
-                isPaused   -> 0xFFFF9800.toInt()  // 橙
-                else       -> 0xFF2196F3.toInt()  // 蓝
+                isComplete            -> 0xFF4CAF50.toInt()  // 绿
+                isPaused || isWaiting -> 0xFFFF9800.toInt()  // 橙
+                else                  -> 0xFF2196F3.toInt()  // 蓝
             }
-            val fallbackIcon = createDownloadIcon(context, tintColor, isComplete)
+            val iconType = IconType.DOWNLOADING
+            val fallbackIcon = createDownloadIcon(context, tintColor, iconType)
             val downloadIcon = appIcon ?: fallbackIcon
 
             // 主按钮：暂停中→恢复，下载中→暂停
@@ -100,7 +110,7 @@ object DownloadIslandNotification {
                                 this.title = fileName
                                 narrowFont = true
                             }
-                            if (!isComplete) {
+                            if (!isComplete && !isWaiting) {
                                 progressInfo {
                                     this.progress = progress
                                 }
@@ -125,8 +135,8 @@ object DownloadIslandNotification {
                     }
                 }
 
-                // 操作按钮（完成时不显示）
-                if (!isComplete) {
+                // 操作按钮（完成/等待中时不显示）
+                if (!isComplete && !isWaiting) {
                     textButton {
                         addActionInfo {
                             val primaryAction = Notification.Action.Builder(
@@ -156,7 +166,8 @@ object DownloadIslandNotification {
             val aodTitle = when {
                 isComplete -> "下载完成"
                 isPaused   -> "已暂停 $progress%"
-                else       -> "下载中 $progress%"
+                isWaiting  -> "等待中"
+                else       -> if (progress >= 0) "下载中 $progress%" else "下载中"
             }
             val existingParam = extras.getString("miui.focus.param")
             if (existingParam != null) {
@@ -169,7 +180,7 @@ object DownloadIslandNotification {
                 } catch (_: Exception) {}
             }
 
-            val stateTag = when { isComplete -> "done"; isPaused -> "paused"; else -> "${progress}%" }
+            val stateTag = when { isComplete -> "done"; isPaused -> "paused"; isWaiting -> "waiting"; else -> "${progress}%" }
             XposedBridge.log("HyperIsland: Island injected — $fileName ($stateTag)")
 
         } catch (e: Exception) {
@@ -178,7 +189,7 @@ object DownloadIslandNotification {
     }
 
     // 下载图标矢量图
-    private fun createDownloadIcon(context: Context, color: Int, done: Boolean): Icon {
+    private fun createDownloadIcon(context: Context, color: Int, iconType: IconType): Icon {
         val density = context.resources.displayMetrics.density
         val size = (48 * density + 0.5f).toInt()
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
@@ -189,40 +200,30 @@ object DownloadIslandNotification {
         }
         val s = size / 24f
         val path = Path()
-        if (done) {
-            // Material "done" checkmark: M9,16.17L4.83,12L3.41,13.41L9,19L21,7L19.59,5.59Z
-            path.moveTo(9 * s, 16.17f * s)
-            path.lineTo(4.83f * s, 12 * s)
-            path.lineTo(3.41f * s, 13.41f * s)
-            path.lineTo(9 * s, 19 * s)
-            path.lineTo(21 * s, 7 * s)
-            path.lineTo(19.59f * s, 5.59f * s)
-            path.close()
-            canvas.drawPath(path, paint)
-        } else {
-            // Material "download" arrow: M19,9H15V3H9V9H5L12,16L19,9Z
-            path.moveTo(19 * s, 9 * s)
-            path.lineTo(15 * s, 9 * s)
-            path.lineTo(15 * s, 3 * s)
-            path.lineTo(9 * s, 3 * s)
-            path.lineTo(9 * s, 9 * s)
-            path.lineTo(5 * s, 9 * s)
-            path.lineTo(12 * s, 16 * s)
-            path.close()
-            canvas.drawPath(path, paint)
-            // 底部弧线（60° 圆弧，托盘状）
-            // 弦长 = 14 units (x: 5→19)，60° 圆心角 → 半径 = 14
-            // 圆心在弦上方：cy = 19 - 14·cos(30°)
-            val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                this.color = color
-                style = Paint.Style.STROKE
-                strokeWidth = 2 * s
-                strokeCap = Paint.Cap.ROUND
+        when (iconType) {
+            IconType.DOWNLOADING -> {
+                // Material "download" arrow
+                path.moveTo(19 * s, 9 * s)
+                path.lineTo(15 * s, 9 * s)
+                path.lineTo(15 * s, 3 * s)
+                path.lineTo(9 * s, 3 * s)
+                path.lineTo(9 * s, 9 * s)
+                path.lineTo(5 * s, 9 * s)
+                path.lineTo(12 * s, 16 * s)
+                path.close()
+                canvas.drawPath(path, paint)
+                // 底部弧线（60° 圆弧，托盘状）
+                val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    this.color = color
+                    style = Paint.Style.STROKE
+                    strokeWidth = 2 * s
+                    strokeCap = Paint.Cap.ROUND
+                }
+                val r = 14f * s
+                val cx = 12f * s
+                val cy = (19f - 14f * Math.cos(Math.toRadians(30.0)).toFloat()) * s
+                canvas.drawArc(RectF(cx - r, cy - r, cx + r, cy + r), 60f, 60f, false, arcPaint)
             }
-            val r = 14f * s
-            val cx = 12f * s
-            val cy = (19f - 14f * Math.cos(Math.toRadians(30.0)).toFloat()) * s
-            canvas.drawArc(RectF(cx - r, cy - r, cx + r, cy + r), 60f, 60f, false, arcPaint)
         }
         return Icon.createWithBitmap(bmp)
     }

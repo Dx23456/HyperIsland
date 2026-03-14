@@ -110,7 +110,10 @@ class DownloadHook : IXposedHookLoadPackage {
 
                         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
                         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-                        if (!isDownloadNotification(title, text, extras)) return
+                        val channelId = notif.channelId ?: ""
+                        // 记录所有通知，用于排查未命中的渠道
+                        XposedBridge.log("HyperIsland: [RAW/Builder] ch=$channelId | title=$title | text=$text | extras=${extras.keySet().joinToString()}")
+                        if (!isDownloadNotification(title, text, extras) && channelId.isEmpty()) return
 
                         val appName = lpparam.packageName.substringAfterLast(".").replaceFirstChar { it.uppercase() }
                         val fileName = extractFileName(title, text, extras)
@@ -178,7 +181,9 @@ class DownloadHook : IXposedHookLoadPackage {
 
             val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
             val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-            if (!isDownloadNotification(title, text, extras)) return
+            val channelId = notif.channelId ?: ""
+            XposedBridge.log("HyperIsland: [RAW/Notify] ch=$channelId | title=$title | text=$text")
+            if (!isDownloadNotification(title, text, extras) && channelId.isEmpty()) return
 
             val appName = lpparam.packageName.substringAfterLast(".").replaceFirstChar { it.uppercase() }
             val fileName = extractFileName(title, text, extras)
@@ -212,19 +217,26 @@ class DownloadHook : IXposedHookLoadPackage {
             val cancelIntent = if (isMultiFile) InProcessController.cancelAllIntent(context) else InProcessController.cancelIntent(context, downloadId)
             val pauseLabel   = if (isMultiFile) "全部暂停" else "暂停"
             val cancelLabel  = if (isMultiFile) "全部取消" else "取消"
-            // 下载完成时清空按钮，下载中时显示暂停+取消
-            notif.actions = if (isComplete) emptyArray() else arrayOf(
-                Notification.Action.Builder(
-                    Icon.createWithResource(context, android.R.drawable.ic_media_pause),
-                    pauseLabel,
-                    pauseIntent
-                ).build(),
-                Notification.Action.Builder(
-                    Icon.createWithResource(context, android.R.drawable.ic_delete),
-                    cancelLabel,
-                    cancelIntent
-                ).build()
-            )
+            val isWaiting = !isComplete &&
+                            (title.contains("等待") || text.contains("等待") ||
+                             title.contains("准备中") || text.contains("准备中"))
+            val cancelAction = Notification.Action.Builder(
+                Icon.createWithResource(context, android.R.drawable.ic_delete),
+                cancelLabel,
+                cancelIntent
+            ).build()
+            // 完成/等待中时清空按钮；下载中显示暂停+取消
+            notif.actions = when {
+                isComplete || isWaiting -> emptyArray()
+                else -> arrayOf(
+                    Notification.Action.Builder(
+                        Icon.createWithResource(context, android.R.drawable.ic_media_pause),
+                        pauseLabel,
+                        pauseIntent
+                    ).build(),
+                    cancelAction
+                )
+            }
 
             DownloadIslandNotification.inject(context, extras, title, text, progress, appName, fileName, downloadId, lpparam.packageName, appIcon = appIcon)
             extras.putBoolean("hyperisland_processed", true)
@@ -308,8 +320,10 @@ class DownloadHook : IXposedHookLoadPackage {
         title.contains("正在下载") ||
         title.contains("下载", ignoreCase = true) ||
         title.contains("download", ignoreCase = true) ||
+        title.contains("等待中") ||
         text.contains("下载", ignoreCase = true) ||
         text.contains("准备", ignoreCase = true) ||
+        text.contains("等待中") ||
         extras.containsKey("progress")
 
     private fun extractProgress(title: String, text: String, extras: Bundle): Int {
